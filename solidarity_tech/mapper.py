@@ -751,26 +751,44 @@ class Users:
     def __len__(self):
         return len(self._users)
 
-    def get(self, *, id=None, external_id=None):
-        """The user with this CRM id, or this external ID, or None.
+    def get(self, *, id=None, external_id=None, email=None, phone_number=None):
+        """The user with this CRM id, external ID, email or phone number, or
+        None.
 
-        By external ID as of the last load or commit: a user given one since
-        is found by it once it is written.
+        An email or number finds whoever holds it, preferred or not; the CRM
+        allows one holder each. All but the id are as of the last load or
+        commit: a user given one since is found by it once it is written.
         """
-        if (id is None) == (external_id is None):
-            raise TypeError("get() takes one of id or external_id")
+        given = {
+            name: value
+            for name, value in (
+                ("id", id),
+                ("external_id", external_id),
+                ("email", email),
+                ("phone_number", phone_number),
+            )
+            if value is not None
+        }
+        if len(given) != 1:
+            raise TypeError("get() takes one of id, external_id, email or phone_number")
+        if id is not None:
+            return self._users.get(int(id))
         if external_id is not None:
             return self._keyed.get(str(external_id))
-        return self._users.get(int(id))
+        if email is not None:
+            return self._holders.get(
+                email if isinstance(email, Email) else Email(email)
+            )
+        if not isinstance(phone_number, PhoneNumber):
+            phone_number = PhoneNumber(phone_number)
+        return self._holders.get(phone_number)
 
     def _index(self):
         self._keyed = {
             u.external_id: u for u in self._users.values() if u.external_id is not None
         }
-
-    def holders(self):
-        """Which user holds each address and number, as last read or written."""
-        return {
+        # Which user holds each address and number, as last read or written.
+        self._holders = {
             c: self._users[id_]
             for id_, before in self._before.items()
             for c in before["emails"] | before["phone_numbers"]
@@ -806,6 +824,8 @@ class Users:
             "emails": state["emails"],
             "phone_numbers": state["phone_numbers"],
         }
+        for contact in state["emails"] | state["phone_numbers"]:
+            self._holders[contact] = survivor
 
     def _flush(self, progress_every):
         """Send what changed: writes to users read, creates, then deletes."""
@@ -880,7 +900,7 @@ class Users:
         return result
 
     def _withhold_contested(self, changed, result):
-        holders = self.holders()
+        holders = self._holders
         wanted = {}
         for user, before, _ in changed:
             for contact in user.holds() - (before["emails"] | before["phone_numbers"]):

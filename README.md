@@ -32,7 +32,7 @@ enforced. Some examples:
 ## Install
 
 ```sh
-pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.6.0"
+pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.7.0"
 ```
 
 ## Use
@@ -56,6 +56,11 @@ for user, method, body in result.planned:
 ```
 
 With `apply=False` nothing is sent; `result.planned` is what would have been.
+
+`session.users.get` takes one of `id`, `external_id`, `email` or
+`phone_number`. An email or number finds whoever holds it, preferred or not,
+compared as the CRM compares them: case-insensitively, and ignoring how a
+number is written.
 
 `external_id` is the key of a custom property that ties each user to a record
 elsewhere, and is optional. Its value is `user.external_id`, not one of

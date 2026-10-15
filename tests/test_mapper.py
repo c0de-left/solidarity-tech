@@ -594,6 +594,34 @@ def test_users_are_found_by_id_or_external_id_and_by_nothing_else():
         s.users.get(id=1, external_id="101")
 
 
+def test_users_are_found_by_any_address_or_number_they_hold():
+    s, _ = session(
+        raw(
+            1,
+            "101",
+            email="wanda@example.org",
+            other_emails=["wokonkwo@work.example"],
+            phone_number="12125550101",
+        ),
+        raw(2, "102", other_phone_numbers=["7185551212"]),
+    )
+    wanda = s.users.get(id=1)
+    assert s.users.get(email="WANDA@example.org") is wanda
+    assert s.users.get(email="wokonkwo@work.example") is wanda
+    assert s.users.get(phone_number="212-555-0101") is wanda
+    assert s.users.get(phone_number=PhoneNumber("17185551212")) is s.users.get(id=2)
+    assert s.users.get(email="nobody@example.org") is None
+
+
+def test_a_merged_users_contacts_are_found_on_the_survivor():
+    s, _ = session(
+        raw(50, "101", email="wanda@example.org"),
+        raw(9, email="wanda@home.example"),
+    )
+    s.users.merge(s.users.get(id=50), [s.users.get(id=9)])
+    assert s.users.get(email="wanda@home.example") is s.users.get(id=50)
+
+
 def test_the_accounts_properties_are_read_when_first_needed():
     client = Recorder(
         [

@@ -7,6 +7,11 @@ JSON into them and turn changes back into requests, and a `Session` holds the
 users of one run and writes what changed. The objects know nothing about HTTP,
 and the gateway underneath knows nothing about users.
 
+This is not a full wrapper of the API. It covers what one integration needs --
+users, their contacts and custom properties, merges and notes -- and grows
+when a need does. Events, lists, tags as objects and querying by property are
+not here. `Client` reaches any endpoint by path in the meantime.
+
 The point is the API's behaviour, most of which is undocumented and was found
 by testing against a live account. Each rule is written down where it is
 enforced. Some examples:

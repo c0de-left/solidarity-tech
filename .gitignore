@@ -1,0 +1,27 @@
+# Comments MUST be on their own line (a trailing "# ..." becomes part of the pattern).
+
+# Credentials
+.gcloud/
+.envrc
+.env
+application_default_credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.venv
+venv/
+
+# Tests / caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+.cache
+
+# Editors
+.idea/
+.vscode/

@@ -5,6 +5,11 @@ walking a collection by offset or by cursor. It knows no resource. What a
 request carries and what a response means is `solidarity_tech.mapper`'s; a job
 that only copies collections as they are can use this alone.
 
+Each concern is a `requests.Session` that overrides `request` and hands on to
+the next, so a `Client` is a session like any other: `client.get(path)`
+returns a `Response`, and a test mounts a transport adapter rather than
+patching anything. Pacing sits below retrying, so every attempt is paced.
+
 Rate limit is 60 requests per 30 seconds, which is 2/second averaged, enforced
 with a 429 carrying `Retry-After`. There is no documented daily cap. At 2/s
 40,000 people written one request each is five and a half hours, so a first
@@ -21,14 +26,6 @@ log = logging.getLogger(__name__)
 
 API_BASE = "https://api.solidarity.tech/v1"
 
-# Documented ceiling is 60 requests per 30 seconds. Pace to the average rather
-# than the burst: the limiter bounds how fast requests start, and a burst that
-# arrives together still counts together on their side.
-REQUESTS_PER_SECOND = 2.0
-
-REQUEST_TIMEOUT = 60
-MAX_RETRIES = 5
-
 # Their maximum; the default is 20.
 PAGE_SIZE = 100
 
@@ -37,131 +34,121 @@ PAGE_SIZE = 100
 SMALLER_PAGES = (25, 5, 1)
 
 
-class Pacer:
-    """Bound how often requests start, to stay under the per-second limit."""
-
-    def __init__(self, per_second):
-        self._interval = 1.0 / per_second
-        self._last = 0.0
-
-    def wait(self):
-        delay = self._last + self._interval - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        self._last = time.monotonic()
+class HTTPError(requests.HTTPError):
+    """A request the API answered and refused."""
 
 
-class Unanswered(RuntimeError):
+class Unanswered(requests.RequestException):
     """A request that timed out or drew a 5xx on every attempt."""
 
 
-class Client:
-    """A paced, retrying reader and writer for the v1 API."""
+class ThrottledSession(requests.Session):
+    """Bound how often requests start.
+
+    The documented ceiling is 60 requests per 30 seconds. Paced to the average
+    rather than the burst: the limit bounds how fast requests start, and a
+    burst that arrives together still counts together on their side.
+    """
+
+    requests_per_second = 2.0
+
+    def __init__(self):
+        super().__init__()
+        self.requests_made = 0
+        self._last_request = 0.0
+
+    def request(self, method, url, **kwargs):
+        if self.requests_per_second:
+            delay = self._last_request + 1 / self.requests_per_second - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        self._last_request = time.monotonic()
+        self.requests_made += 1
+        return super().request(method, url, **kwargs)
+
+
+class RetrySession(ThrottledSession):
+    """Ask again when there was no answer, and wait when told to.
+
+    A timeout, a dropped connection and a 5xx are the same situation -- no
+    verdict -- and are retried `retry_attempts` times, waiting twice as long
+    each time. A reset is not rare over tens of thousands of calls: one ended a
+    run of 26,000 writes at the 3,700th. A retried write may repeat one that
+    landed, which is harmless for an upsert on `lookup_key` or a PUT, surfaces
+    as a 404 for a DELETE, and writes a note twice.
+
+    A 429 is an answer, not the absence of one, so it is waited out for as long
+    as `Retry-After` says, up to `throttled_attempts` times, whatever
+    `retry_attempts` is: a caller that turns retries off to ask for a smaller
+    page has no reason to stop slowing down.
+    """
+
+    retry_attempts = 4
+    retry_wait_seconds = 2.0
+    throttled_attempts = 5
+
+    def request(self, method, url, retry_attempts=None, **kwargs):
+        attempts = self.retry_attempts if retry_attempts is None else retry_attempts
+        tries = throttled = 0
+        while True:
+            try:
+                response = super().request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                failure, cause = f"{type(exc).__name__}: {exc}", exc
+            else:
+                if response.status_code == 429:
+                    throttled += 1
+                    if throttled < self.throttled_attempts:
+                        wait = float(response.headers.get("Retry-After", 2**throttled))
+                        log.warning(
+                            "  429 from %s %s, waiting %.0fs", method, url, wait
+                        )
+                        time.sleep(wait)
+                        continue
+                    return response
+                if response.status_code < 500:
+                    return response
+                failure, cause = f"{response.status_code}: {response.text[:500]}", None
+            if tries == attempts:
+                raise Unanswered(
+                    f"{method} {url}, {tries + 1} attempts: {failure}"
+                ) from cause
+            tries += 1
+            wait = self.retry_wait_seconds * 2 ** (tries - 1)
+            log.warning(
+                "  %s from %s %s, retrying in %.0fs", failure, method, url, wait
+            )
+            time.sleep(wait)
+
+
+class Client(RetrySession):
+    """The v1 API, by path: `client.get("/users/7").json()`.
+
+    The token is `SOLIDARITY_API_KEY` unless given. A refusal raises
+    `HTTPError` carrying the API's own explanation, which is usually the only
+    account of what was wrong with a write.
+    """
+
+    timeout = 60
 
     def __init__(self, token=None):
+        super().__init__()
         token = token or os.environ["SOLIDARITY_API_KEY"]
-        self._session = requests.Session()
-        self._session.headers.update(
+        self.headers.update(
             {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         )
-        self._pacer = Pacer(REQUESTS_PER_SECOND)
-        self.requests_made = 0
 
-    def _call(self, method, path, params=None, json_body=None, attempts=MAX_RETRIES):
-        url = f"{API_BASE}{path}"
-        attempt = throttled = 0
-        while True:
-            self._pacer.wait()
-            self.requests_made += 1
-            try:
-                response = self._session.request(
-                    method, url, params=params, json=json_body, timeout=REQUEST_TIMEOUT
-                )
-            except (requests.ConnectionError, requests.Timeout) as exc:
-                attempt += 1
-                # The request never got a verdict, which is the same situation a
-                # 5xx describes and is handled the same way. A reset is not rare
-                # over a run of tens of thousands of calls -- one ended a run of
-                # 26,000 writes at the 3,700th -- and it escaped the retry below
-                # because requests raises before there is a response to inspect.
-                #
-                # A retried write may be a repeat of one that landed. That is
-                # harmless for an upsert on lookup_key or a PUT, which resolve to
-                # the same user; a repeated note is written twice.
-                if attempt == attempts:
-                    raise Unanswered(
-                        f"{type(exc).__name__} from {method} {url} after "
-                        f"{attempts} attempts: {exc}"
-                    ) from exc
-                pause = float(2**attempt)
-                log.warning(
-                    "  %s from %s %s, retrying in %.0fs (attempt %d/%d)",
-                    type(exc).__name__,
-                    method,
-                    url,
-                    pause,
-                    attempt,
-                    attempts,
-                )
-                time.sleep(pause)
-                continue
-
-            if response.status_code == 429:
-                # An answer, not the absence of one, so it is retried in full
-                # whatever `attempts` says: paginate_cursor shortens that to ask
-                # for a smaller page, and slowing down is no reason to.
-                throttled += 1
-                if throttled == MAX_RETRIES:
-                    raise RuntimeError(
-                        f"429 from {method} {url} after {MAX_RETRIES} attempts: "
-                        f"{response.text[:500]}"
-                    )
-                pause = float(response.headers.get("Retry-After", 2**throttled))
-                log.warning(
-                    "  429 from %s %s, retrying in %.0fs (attempt %d/%d)",
-                    method,
-                    url,
-                    pause,
-                    throttled,
-                    MAX_RETRIES,
-                )
-                time.sleep(pause)
-                continue
-
-            if response.status_code >= 500:
-                attempt += 1
-                if attempt == attempts:
-                    raise Unanswered(
-                        f"{response.status_code} from {method} {url} after "
-                        f"{attempts} attempts: {response.text[:500]}"
-                    )
-                pause = float(response.headers.get("Retry-After", 2**attempt))
-                log.warning(
-                    "  %s from %s %s, retrying in %.0fs (attempt %d/%d)",
-                    response.status_code,
-                    method,
-                    url,
-                    pause,
-                    attempt,
-                    attempts,
-                )
-                time.sleep(pause)
-                continue
-
-            if not response.ok:
-                raise RuntimeError(
-                    f"{response.status_code} from {method} {url}: {response.text[:500]}"
-                )
-            return response.json() if response.content else None
-
-    def get(self, path, params=None, attempts=MAX_RETRIES):
-        return self._call("GET", path, params=params, attempts=attempts)
-
-    def post(self, path, json_body):
-        return self._call("POST", path, json_body=json_body)
-
-    def put(self, path, json_body):
-        return self._call("PUT", path, json_body=json_body)
+    def request(self, method, url, **kwargs):
+        if url.startswith("/"):
+            url = API_BASE + url
+        kwargs.setdefault("timeout", self.timeout)
+        response = super().request(method, url, **kwargs)
+        if not response.ok:
+            raise HTTPError(
+                f"{response.status_code} from {method} {url}: {response.text[:500]}",
+                response=response,
+            )
+        return response
 
     def paginate_cursor(self, path, params=None):
         """Yield every object in a collection, following `meta.next_cursor`.
@@ -182,7 +169,7 @@ class Client:
         walk of `/activities` failed on one page of 100 that timed out five times
         running (the gateway gives up at 90 seconds), while 5 at the same cursor
         came back in under a second; a minute later all 100 did. Only the
-        smallest page is retried as the other calls are. A success steps back
+        smallest page is retried as other requests are. A success steps back
         up one size, not straight to 100: the slow pages come in runs, and each
         page of 100 that fails costs the full timeout.
         """
@@ -196,12 +183,9 @@ class Client:
                 request["_cursor"] = cursor
             smallest = step == len(sizes) - 1
             try:
-                page = (
-                    self.get(
-                        path, params=request, attempts=MAX_RETRIES if smallest else 1
-                    )
-                    or {}
-                )
+                page = self.get(
+                    path, params=request, retry_attempts=None if smallest else 0
+                ).json()
             except Unanswered as exc:
                 if smallest:
                     raise
@@ -213,16 +197,6 @@ class Client:
             cursor = (page.get("meta") or {}).get("next_cursor")
             if not cursor:
                 return
-
-    def delete(self, path, params=None):
-        """Remove an object. Not an upsert, and not recoverable.
-
-        The retry in `_call` is safe on the writes above because they are
-        upserts -- a repeat resolves to the same person. A repeated DELETE is
-        harmless for a different reason: the second one 404s, which surfaces as
-        an error rather than as damage.
-        """
-        return self._call("DELETE", path, params=params)
 
     def paginate(self, path, params=None):
         """Yield every object in a collection, walking `_offset`.
@@ -242,7 +216,7 @@ class Client:
         offset = 0
         while True:
             params["_offset"] = offset
-            page = self.get(path, params=params) or {}
+            page = self.get(path, params=params).json()
             rows = page.get("data") or []
             yield from rows
             if len(rows) < PAGE_SIZE:

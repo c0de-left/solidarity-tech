@@ -6,26 +6,63 @@ the walk and every activity older than it would simply never arrive, with no
 error and a plausible-looking row count.
 """
 
+import json
+
 import pytest
 import requests
+from requests.adapters import BaseAdapter
 
-from solidarity_tech import gateway
-from solidarity_tech.gateway import Client, Unanswered
+from solidarity_tech.gateway import Client, HTTPError, Unanswered
+
+
+class Scripted(BaseAdapter):
+    """A transport that answers from a script: a page, a status, or an
+    exception to raise."""
+
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = list(replies)
+        self.sent = []
+
+    def send(self, request, **kwargs):
+        self.sent.append(request)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        status, payload, headers = (
+            reply if isinstance(reply, tuple) else (200, reply, {})
+        )
+        response = requests.Response()
+        response.status_code = status
+        response._content = json.dumps(payload).encode()
+        response.headers.update(headers)
+        response.request, response.url = request, request.url
+        return response
+
+    def close(self):
+        pass
 
 
 class FakeClient(Client):
-    """A client whose pages are scripted rather than fetched."""
+    requests_per_second = 0
+    retry_wait_seconds = 0
 
-    def __init__(self, pages):
-        self._pages = list(pages)
-        self.calls = []
+    def __init__(self, replies):
+        super().__init__(token="t")
+        self.adapter = Scripted(replies)
+        self.mount("https://", self.adapter)
 
-    def get(self, path, params=None, attempts=None):
-        self.calls.append(dict(params or {}))
-        answer = self._pages.pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
+    @property
+    def calls(self):
+        return [
+            {
+                k: (int(v) if v.isdigit() else v)
+                for k, v in (
+                    pair.split("=") for pair in (r.url.split("?") + [""])[1].split("&")
+                )
+            }
+            for r in self.adapter.sent
+        ]
 
 
 def page(rows, next_cursor=None):
@@ -68,7 +105,7 @@ def test_a_missing_or_empty_cursor_all_mean_the_end(meta):
 
 def test_a_page_that_goes_unanswered_is_asked_for_again_smaller():
     """At the same cursor, then back up a size at a time as pages come through."""
-    timed_out = Unanswered("ReadTimeout")
+    timed_out = (504, {}, {})
     client = FakeClient(
         [
             page([1], "c1"),
@@ -94,70 +131,49 @@ def test_a_page_that_goes_unanswered_is_asked_for_again_smaller():
 
 
 def test_a_page_keeps_its_filters_when_it_shrinks():
-    client = FakeClient([page([1], "c1"), Unanswered("504"), page([2])])
+    client = FakeClient([page([1], "c1"), (504, {}, {}), page([2])])
     list(client.paginate_cursor("/activities", {"_since": 1755000000}))
     assert client.calls[2] == {"_since": 1755000000, "_limit": 25, "_cursor": "c1"}
 
 
 def test_a_page_unanswered_even_at_one_row_fails_the_walk():
-    client = FakeClient([Unanswered("504")] * 4)
+    client = FakeClient([(504, {}, {})] * 8)
     with pytest.raises(Unanswered):
         list(client.paginate_cursor("/activities"))
-    assert [c["_limit"] for c in client.calls] == [100, 25, 5, 1]
+    assert [c["_limit"] for c in client.calls] == [100, 25, 5, 1, 1, 1, 1, 1]
 
 
-class Reply:
-    def __init__(self, status, body=b"{}", headers=None):
-        self.status_code = status
-        self.content = body
-        self.text = body.decode()
-        self.headers = headers or {}
-        self.ok = status < 400
-
-    def json(self):
-        return {}
-
-
-class ScriptedSession:
-    def __init__(self, replies):
-        self._replies = list(replies)
-
-    def request(self, *args, **kwargs):
-        reply = self._replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
-
-def scripted_client(replies, monkeypatch):
-    monkeypatch.setattr(gateway.time, "sleep", lambda seconds: None)
-    client = Client.__new__(Client)
-    client._session = ScriptedSession(replies)
-    client._pacer = gateway.Pacer(1000)
-    client.requests_made = 0
-    return client
-
-
-def test_a_429_is_waited_out_even_on_a_single_attempt(monkeypatch):
+def test_a_429_is_waited_out_even_with_retries_off(monkeypatch):
     """Being told to slow down is an answer, so it does not shrink a page."""
-    client = scripted_client(
-        [Reply(429, headers={"Retry-After": "30"}), Reply(200)], monkeypatch
-    )
-    assert client.get("/activities", attempts=1) == {}
+    waits = []
+    monkeypatch.setattr("time.sleep", waits.append)
+    client = FakeClient([(429, {}, {"Retry-After": "30"}), {"data": []}])
+    assert client.get("/activities", retry_attempts=0).json() == {"data": []}
     assert client.requests_made == 2
+    assert waits == [30.0]
 
 
-def test_a_429_that_persists_fails_without_claiming_no_answer(monkeypatch):
-    client = scripted_client([Reply(429)] * gateway.MAX_RETRIES, monkeypatch)
-    with pytest.raises(RuntimeError) as raised:
-        client.get("/activities", attempts=1)
-    assert not isinstance(raised.value, Unanswered)
+def test_a_429_that_persists_is_a_refusal_not_no_answer():
+    client = FakeClient([(429, {}, {"Retry-After": "0"})] * 5)
+    with pytest.raises(HTTPError):
+        client.get("/activities", retry_attempts=0)
 
 
 @pytest.mark.parametrize(
-    "reply", [Reply(504), requests.Timeout("read timed out")], ids=["504", "timeout"]
+    "reply", [(504, {}, {}), requests.Timeout("read timed out")], ids=["504", "timeout"]
 )
-def test_a_single_attempt_is_unanswered_on_a_5xx_or_a_timeout(reply, monkeypatch):
-    client = scripted_client([reply], monkeypatch)
+def test_with_retries_off_a_5xx_or_a_timeout_is_unanswered(reply):
+    client = FakeClient([reply])
     with pytest.raises(Unanswered):
-        client.get("/activities", attempts=1)
+        client.get("/activities", retry_attempts=0)
+
+
+def test_no_answer_is_asked_again_and_an_answer_is_returned():
+    client = FakeClient([requests.ConnectionError("reset"), (502, {}, {}), {"id": 7}])
+    assert client.get("/users/7").json() == {"id": 7}
+
+
+def test_a_refusal_carries_the_apis_explanation():
+    client = FakeClient([(422, {"error": "Phone number is not textable"}, {})])
+    with pytest.raises(HTTPError, match="422 .*not textable"):
+        client.post("/users", json={})

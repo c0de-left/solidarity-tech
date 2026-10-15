@@ -1,7 +1,13 @@
 """Solidarity Tech's API as objects: a gateway for the transport, mappers for
 users, custom properties and notes, and a Session for the users of one run."""
 
-from solidarity_tech.gateway import Client, Unanswered
+from solidarity_tech.gateway import (
+    Client,
+    HTTPError,
+    RetrySession,
+    ThrottledSession,
+    Unanswered,
+)
 from solidarity_tech.mapper import (
     Commit,
     Contacts,
@@ -29,6 +35,7 @@ __all__ = [
     "DuplicateExternalId",
     "Email",
     "ExternalIdChanged",
+    "HTTPError",
     "KeyNotDerived",
     "LoginMergedAway",
     "MatchedSomeoneElse",
@@ -38,7 +45,9 @@ __all__ = [
     "PhoneNumber",
     "Property",
     "PropertyMapper",
+    "RetrySession",
     "Session",
+    "ThrottledSession",
     "Unanswered",
     "User",
     "UserMapper",

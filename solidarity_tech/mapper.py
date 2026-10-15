@@ -1,10 +1,10 @@
 """Solidarity Tech's users and custom properties as objects, and the requests
 that read and write them.
 
-Nothing here knows about any one organisation. Each mapper turns the API's JSON into objects and
-objects back into requests, and a Session holds the users of one run: one
-object per CRM user, a snapshot of each as read, and the requests that make
-the account say what the objects now say.
+Nothing here knows about any one organisation. Each mapper turns the API's
+JSON into objects and objects back into requests, and a Session holds the users
+of one run: one object per CRM user, a snapshot of each as read, and the
+requests that make the account say what the objects now say.
 
 Values are compared as they would be sent, not as they were read. A select
 reads back as a list of every option its stored string contains and is written
@@ -12,9 +12,12 @@ as one option's value; a date reads as a string and is assigned as a date. Both
 sides go through the same encoding, so a change is a difference in what the
 request would carry.
 
-A user's identity is its external ID: the value of one custom property, named
-as the `lookup_key` on every write. It is the only thing that ties a CRM user to
-a record elsewhere, and the API enforces nothing about it, so the Session does:
+A user is its CRM id. It may also have an external ID: the value of one custom
+property, named as the `lookup_key` on writes, that ties the user to a record
+elsewhere. Without one, users read are written by `PUT /users/{id}`, and a user
+created is posted bare, which the CRM matches on email and phone -- so a
+create can land on an existing user, and is reported when it does. With one,
+the API enforces nothing about it, so the Session does:
 
   1. One user per external ID. Two holding the same one is an error at load,
      since an upsert lands on one of them arbitrarily.
@@ -51,6 +54,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
+
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -209,7 +214,7 @@ class PropertyMapper:
             ]
         if prop.description:
             body["description"] = prop.description
-        self.client.post("/custom_user_properties", body)
+        self.client.post("/custom_user_properties", json=body)
         created = next((p for p in self.find_all() if p.key == prop.key), None)
         if created is None:
             raise KeyNotDerived(
@@ -243,7 +248,7 @@ class NoteMapper:
     def insert(self, user, note):
         self.client.post(
             "/user_notes",
-            {
+            json={
                 "user_id": user.id,
                 "content": note.content,
                 "created_at": int(note.created_at.timestamp()),
@@ -307,6 +312,9 @@ class User:
     then too: left out of the create, it is whatever the CRM defaults to, which
     is granted. Everything else the API returns on every user.
 
+    `properties` are by key, a select's by option label:
+    `user.properties["membership-status"] = "Retired"`.
+
     `login` is whether a team member signs in as this user. The user record
     does not say; only `/team_members` does. It is read, never written.
     """
@@ -321,7 +329,7 @@ class User:
     emails: Contacts = field(default_factory=Contacts)
     phone_numbers: Contacts = field(default_factory=Contacts)
     address: dict[str, Any] = field(default_factory=dict)
-    properties: dict[Property, Any] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
     tags: set[str] = field(default_factory=set)
     assessment: str | None = None
     login: bool = False
@@ -350,12 +358,33 @@ ADDRESS_PARTS = ("address1", "address2", "city", "state", "zip_code", "country")
 
 
 class UserMapper:
-    """`/users` and `/users/merge`."""
+    """`/users` and `/users/merge`.
 
-    def __init__(self, client, properties, external_id):
+    `external_id` is the key of the property that ties a user to a record
+    elsewhere, if any. The account's properties are read when first needed,
+    unless given.
+    """
+
+    def __init__(self, client, external_id=None, properties=None):
         self.client = client
-        self.properties = {p.key: p for p in properties}
-        self.external_id_property = external_id
+        self.external_id_key = external_id
+        self._properties = (
+            None if properties is None else {p.key: p for p in properties}
+        )
+
+    @property
+    def properties(self):
+        if self._properties is None:
+            self._properties = {
+                p.key: p for p in PropertyMapper(self.client).find_all()
+            }
+        return self._properties
+
+    def property(self, key):
+        try:
+            return self.properties[key]
+        except KeyError:
+            raise KeyError(f"the account has no custom property {key!r}") from None
 
     def find_all(self):
         """Every user, walked by cursor.
@@ -377,8 +406,7 @@ class UserMapper:
         properties = {}
         for key, value in (raw.get("custom_user_properties") or {}).items():
             prop = self.properties.get(key)
-            if prop is not None:
-                properties[prop] = self.read_value(prop, value)
+            properties[key] = value if prop is None else self.read_value(prop, value)
         assessment = raw.get("assessment")
         return User(
             id=raw["id"],
@@ -412,18 +440,14 @@ class UserMapper:
         the longest is what was. Checkboxes hold several on purpose.
         """
         if prop.type == "checkboxes" and isinstance(value, list):
-            return [
-                prop.option(text(o.get("label"))) or text(o.get("label"))
-                for o in value
-                if isinstance(o, dict)
-            ]
+            return [text(o.get("label")) for o in value if isinstance(o, dict)]
         if isinstance(value, list):
             held = [o for o in value if isinstance(o, dict)]
             if not held:
                 return None
             written = max(held, key=lambda o: len(o.get("value") or ""))
             return next(
-                (o for o in prop.options if o.value == written.get("value")),
+                (o.label for o in prop.options if o.value == written.get("value")),
                 written.get("value"),
             )
         if prop.type == "date" and isinstance(value, str):
@@ -489,7 +513,9 @@ class UserMapper:
                 ) from None
 
     def external_id(self, user):
-        value = user.properties.get(self.external_id_property)
+        if self.external_id_key is None:
+            return None
+        value = user.properties.get(self.external_id_key)
         return None if value in (None, "") else str(value)
 
     def state(self, user):
@@ -502,8 +528,8 @@ class UserMapper:
             "phone_numbers": frozenset(user.phone_numbers),
             "address": {part: user.address.get(part) for part in ADDRESS_PARTS},
             "properties": {
-                prop.key: self.write_value(prop, value)
-                for prop, value in user.properties.items()
+                key: self.write_value(self.property(key), value)
+                for key, value in user.properties.items()
             },
             "tags": frozenset(user.tags),
         }
@@ -592,24 +618,26 @@ class UserMapper:
         return [*steps, *([last] if last else [])]
 
     def upsert(self, external_id, body):
-        """`POST /users` on an external ID. Returns the id written to."""
-        key = self.external_id_property.key
-        body = {
-            "lookup_key": key,
-            **body,
-            "custom_user_properties": {
-                **body.get("custom_user_properties", {}),
-                key: external_id,
-            },
-            # Or a landline rejects the whole user with a 422.
-            "phone_number_textable_validation": False,
-        }
+        """`POST /users`, on an external ID if there is one. Returns the id
+        written to."""
+        # Or a landline rejects the whole user with a 422.
+        body = {**body, "phone_number_textable_validation": False}
+        if external_id is not None:
+            key = self.external_id_key
+            body = {
+                "lookup_key": key,
+                **body,
+                "custom_user_properties": {
+                    **body.get("custom_user_properties", {}),
+                    key: external_id,
+                },
+            }
         if not (body.get("email") or body.get("phone_number")):
             body["require_contact_info"] = False
-        return written_id(self.client.post("/users", body))
+        return written_id(self.client.post("/users", json=body).json())
 
     def update(self, user, body):
-        self.client.put(f"/users/{user.id}", body)
+        self.client.put(f"/users/{user.id}", json=body)
 
     def delete(self, user):
         """Destroys the user's activities with them -- notes, calls,
@@ -628,7 +656,10 @@ class UserMapper:
         """
         self.client.post(
             "/users/merge",
-            {"primary_user_id": survivor.id, "user_ids": [d.id for d in duplicates]},
+            json={
+                "primary_user_id": survivor.id,
+                "user_ids": [d.id for d in duplicates],
+            },
         )
 
 
@@ -678,6 +709,7 @@ class Session:
         self.apply = apply
         self._users = {}
         self._before = {}
+        self._keyed = {}
         self._new = []
         self._removed = []
 
@@ -686,6 +718,7 @@ class Session:
         found = self.mapper.find_all() if users is None else users
         self._users = {u.id: u for u in found}
         self._before = {id_: self.mapper.state(u) for id_, u in self._users.items()}
+        self._index()
         holders = {}
         for user in self._users.values():
             external = self.mapper.external_id(user)
@@ -698,18 +731,36 @@ class Session:
                 + ", ".join(f"{k}: {ids}" for k, ids in list(shared.items())[:5])
             )
 
-    def users(self):
-        return list(self._users.values())
+    def __iter__(self):
+        return iter(list(self._users.values()))
 
-    def by_external_id(self):
-        return {
+    def __len__(self):
+        return len(self._users)
+
+    def get(self, id=None, *, external_id=None):
+        """The user with this CRM id, or this external ID, or None.
+
+        By external ID as of the last load or commit: a user given one since
+        is found by it once it is written.
+        """
+        if external_id is not None:
+            return self._keyed.get(str(external_id))
+        return self._users.get(int(id))
+
+    def keyed(self):
+        """Every user with an external ID, by it, as of the last load or
+        commit."""
+        return dict(self._keyed)
+
+    def external_id(self, user):
+        return self.mapper.external_id(user)
+
+    def _index(self):
+        self._keyed = {
             self.mapper.external_id(u): u
             for u in self._users.values()
             if self.mapper.external_id(u) is not None
         }
-
-    def by_id(self, user_id):
-        return self._users.get(int(user_id))
 
     def holders(self):
         """Which user holds each address and number, as last read or written."""
@@ -742,6 +793,7 @@ class Session:
         for duplicate in duplicates:
             del self._users[duplicate.id]
             del self._before[duplicate.id]
+            self._keyed.pop(self.mapper.external_id(duplicate), None)
         state = self.mapper.state(survivor)
         self._before[survivor.id] = {
             **self._before[survivor.id],
@@ -764,20 +816,22 @@ class Session:
 
         writes = []
         for user, before, new in changed:
-            after = self.mapper.state(user)
             try:
-                for prop, value in user.properties.items():
-                    if after["properties"][prop.key] != before["properties"].get(
-                        prop.key, ""
-                    ):
-                        self.mapper.check(prop, value)
-            except ValueError as error:
+                after = self.mapper.state(user)
+                for key, value in user.properties.items():
+                    if after["properties"][key] != before["properties"].get(key, ""):
+                        self.mapper.check(self.mapper.property(key), value)
+            except (KeyError, ValueError) as error:
                 result.rejected.append((user, str(error)))
                 continue
-            requests = self.mapper.writes(before, after, new=new)
-            keyed = new or self._external_before(before) is not None
-            for body in requests:
-                writes.append((user, body, "POST" if keyed else "PUT"))
+            keyed = (new and self.mapper.external_id(user) is not None) or (
+                self._external_before(before) is not None
+            )
+            for n, body in enumerate(self.mapper.writes(before, after, new=new)):
+                # Without an external ID, a new user is posted once and is
+                # then written by the id the create returned.
+                method = "POST" if keyed or (new and n == 0) else "PUT"
+                writes.append((user, body, method))
 
         # A user whose write failed gets none of the rest of their sequence: a
         # lookup on a user who was never created would create somebody else.
@@ -795,7 +849,7 @@ class Session:
             if self.apply:
                 try:
                     self.mapper.delete(user)
-                except RuntimeError as error:
+                except requests.RequestException as error:
                     result.rejected.append((user, str(error)[-200:]))
             self._users.pop(user.id, None)
             self._before.pop(user.id, None)
@@ -808,6 +862,7 @@ class Session:
             id_: self._before[id_] if id_ in refused else self.mapper.state(u)
             for id_, u in self._users.items()
         }
+        self._index()
         self._new, self._removed = [], []
         return result
 
@@ -831,7 +886,9 @@ class Session:
                 result.withheld.append((user, contact))
 
     def _external_before(self, before):
-        value = before["properties"].get(self.mapper.external_id_property.key)
+        if self.mapper.external_id_key is None:
+            return None
+        value = before["properties"].get(self.mapper.external_id_key)
         return None if value in (None, "") else str(value)
 
     def _send(self, user, body, method, result):
@@ -842,7 +899,7 @@ class Session:
                 return True
             try:
                 written = self.mapper.upsert(self.mapper.external_id(user), body)
-            except RuntimeError as error:
+            except requests.HTTPError as error:
                 # An address the CRM will not deliver to rejects the whole
                 # user. Better the user without it than no user.
                 if "email" not in str(error) or "email" not in body:
@@ -852,7 +909,7 @@ class Session:
                 if not body:
                     return True
                 written = self.mapper.upsert(self.mapper.external_id(user), body)
-        except RuntimeError as error:
+        except requests.RequestException as error:
             result.rejected.append((user, str(error)[-200:]))
             return False
         return self._check_landed(user, written, result)

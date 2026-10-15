@@ -32,7 +32,7 @@ enforced. Some examples:
 ## Install
 
 ```sh
-pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.5.0"
+pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.6.0"
 ```
 
 ## Use
@@ -41,7 +41,7 @@ pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@
 from solidarity_tech import Client, Email, PhoneNumber, Session, UserMapper
 
 client = Client()  # reads SOLIDARITY_API_KEY
-session = Session(UserMapper(client, external_id="member-id"), apply=False)
+session = Session(users=UserMapper(client, external_id="member-id"), apply=False)
 session.load()
 
 user = session.users.get(external_id="1042")

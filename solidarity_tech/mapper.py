@@ -763,11 +763,6 @@ class Users:
             return self._keyed.get(str(external_id))
         return self._users.get(int(id))
 
-    def keyed(self):
-        """Every user with an external ID, by it, as of the last load or
-        commit."""
-        return dict(self._keyed)
-
     def _index(self):
         self._keyed = {
             u.external_id: u for u in self._users.values() if u.external_id is not None
@@ -949,14 +944,17 @@ class Users:
 class Session:
     """What one run reads and writes, by kind of object: `session.users`.
 
+    Each kind is given its mapper by name -- `Session(users=UserMapper(...),
+    apply=False)` -- and is the collection of that name.
+
     Nothing is sent unless `apply`. A dry run goes through the same steps and
     leaves the objects as the account would be, so what follows reads the
     account as it would be too.
     """
 
-    def __init__(self, mapper, apply):
+    def __init__(self, *, users, apply):
         self.apply = apply
-        self.users = Users(mapper, apply)
+        self.users = Users(users, apply)
 
     def load(self, users=None):
         """Read every user, or take these."""

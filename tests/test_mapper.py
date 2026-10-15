@@ -143,7 +143,7 @@ def raw(user_id, person_id=None, **fields):
 
 def session(*users, apply=True, **client):
     recorder = Recorder(users, **client)
-    s = Session(UserMapper(recorder, "member-id", PROPERTIES), apply)
+    s = Session(users=UserMapper(recorder, "member-id", PROPERTIES), apply=apply)
     s.load()
     return s, recorder
 
@@ -556,7 +556,7 @@ def test_a_login_is_never_merged_away():
     """The merge deletes the user, and the team member's dashboard access."""
     client = Recorder([raw(1, "101"), raw(2)])
     client.paginate = lambda path: [{"user_id": 2}]
-    s = Session(UserMapper(client, "member-id", PROPERTIES), apply=True)
+    s = Session(users=UserMapper(client, "member-id", PROPERTIES), apply=True)
     s.load()
     assert s.users.get(id=2).login and not s.users.get(id=1).login
     with pytest.raises(LoginMergedAway):
@@ -606,7 +606,7 @@ def test_the_accounts_properties_are_read_when_first_needed():
             )
         ]
     )
-    s = Session(UserMapper(client, "member-id"), apply=True)
+    s = Session(users=UserMapper(client, "member-id"), apply=True)
     s.load()
     assert client.calls == [("GET", "/custom_user_properties", None)]
     assert s.users.get(id=1).properties["membership-status"] == "Retired"
@@ -629,7 +629,7 @@ def test_a_property_the_account_lacks_rejects_the_user():
 
 def test_without_an_external_id_users_are_written_by_id():
     recorder = Recorder([raw(1, phone_number="2125550101")])
-    s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
+    s = Session(users=UserMapper(recorder, properties=PROPERTIES), apply=True)
     s.load()
     s.users.get(id=1).first_name = "Wendy"
     new = s.users.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
@@ -649,7 +649,7 @@ def test_without_an_external_id_users_are_written_by_id():
 def test_without_an_external_id_a_create_matched_to_someone_is_reported():
     """A bare POST matches on email and phone, and may update somebody."""
     recorder = Recorder([raw(1, phone_number="2125550101")], lands_on={None: 1})
-    s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
+    s = Session(users=UserMapper(recorder, properties=PROPERTIES), apply=True)
     s.load()
     new = s.users.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
     result = s.commit(progress_every=0)
@@ -688,7 +688,7 @@ def test_the_external_id_is_an_attribute_and_not_a_property():
 
 def test_an_external_id_with_no_property_for_it_rejects_the_user():
     recorder = Recorder([raw(1)])
-    s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
+    s = Session(users=UserMapper(recorder, properties=PROPERTIES), apply=True)
     s.load()
     s.users.get(id=1).external_id = "101"
     assert [u.id for u, _ in s.commit(progress_every=0).rejected] == [1]

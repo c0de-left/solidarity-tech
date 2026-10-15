@@ -286,7 +286,7 @@ def test_giving_a_user_its_external_id_is_a_put():
     """A POST on an ID nobody holds yet would create somebody, or take over
     whoever holds the phone."""
     s, recorder = session(raw(7))
-    s.users.get(id=7).properties["member-id"] = "102"
+    s.users.get(id=7).external_id = "102"
     s.commit()
     assert recorder.calls == [
         ("PUT", "/users/7", {"custom_user_properties": {"member-id": "102"}})
@@ -296,7 +296,7 @@ def test_giving_a_user_its_external_id_is_a_put():
 
 def test_an_external_id_is_never_changed():
     s, recorder = session(raw(1, "101"))
-    s.users.get(id=1).properties["member-id"] = "102"
+    s.users.get(id=1).external_id = "102"
     with pytest.raises(ExternalIdChanged):
         s.commit()
     assert recorder.calls == []
@@ -317,7 +317,7 @@ def test_a_create_that_lands_on_somebody_already_held_is_reported():
             phone_numbers=Contacts(preferred=PhoneNumber("2125550101")),
         )
     )
-    new.properties["member-id"] = "102"
+    new.external_id = "102"
     result = s.commit()
     assert result.misdirected == [(new, 1)]
 
@@ -331,7 +331,7 @@ def test_a_write_that_lands_on_another_user_is_reported():
 def test_a_create_gets_the_id_it_landed_on():
     s, _ = session(lands_on={"102": 55})
     new = s.users.add(User(chapter_id=2913, email_permission=True))
-    new.properties["member-id"] = "102"
+    new.external_id = "102"
     s.commit()
     assert new.id == 55
     assert s.users.get(external_id="102") is new
@@ -434,7 +434,7 @@ def test_a_new_preferred_number_is_one_write():
 def test_a_new_user_is_created_then_given_the_rest():
     s, recorder = session(lands_on={"102": 55})
     new = s.users.add(User(chapter_id=2913, email_permission=True))
-    new.properties["member-id"] = "102"
+    new.external_id = "102"
     new.phone_numbers |= [PhoneNumber("7185551212")]
     new.phone_numbers.preferred = PhoneNumber("2125550101")
     s.commit()
@@ -483,7 +483,7 @@ def test_a_failed_create_sends_none_of_the_rest():
     s, recorder = session()
     recorder.reject = "chapter_id"
     new = s.users.add(User(chapter_id=2913, email_permission=True))
-    new.properties["member-id"] = "102"
+    new.external_id = "102"
     new.phone_numbers |= [PhoneNumber("7185551212")]
     new.phone_numbers.preferred = PhoneNumber("2125550101")
     result = s.commit()
@@ -506,7 +506,7 @@ def test_a_misdirected_create_does_not_replace_the_user_it_landed_on():
     s, _ = session(raw(1, "101"), lands_on={"102": 1})
     held = s.users.get(id=1)
     new = s.users.add(User(chapter_id=2913, email_permission=True))
-    new.properties["member-id"] = "102"
+    new.external_id = "102"
     s.commit()
     assert s.users.get(id=1) is held
     assert new.id is None
@@ -664,12 +664,32 @@ def test_a_number_reads_as_the_number_written_and_unset_as_none():
     )
     assert s.users.get(id=1).properties["teaching-hours-per-term"] == 45.0
     assert s.users.get(id=2).properties["teaching-hours-per-term"] == 90
+    assert s.users.get(id=3).external_id == "103"
     assert s.users.get(id=3).properties == {
-        "member-id": "103",
         "membership-status": None,
         "title-series": None,
         "hire-date": None,
         "teaching-hours-per-term": None,
     }
     s.commit(progress_every=0)
+    assert recorder.calls == []
+
+
+def test_the_external_id_is_an_attribute_and_not_a_property():
+    s, recorder = session(raw(1, "101"), raw(2, "102"))
+    assert s.users.get(id=1).external_id == "101"
+    assert "member-id" not in s.users.get(id=1).properties
+    s.users.get(id=1).properties["member-id"] = "999"
+    s.users.get(id=2).first_name = "Wendy"
+    result = s.commit(progress_every=0)
+    assert [u.id for u, _ in result.rejected] == [1]
+    assert [body["first_name"] for _, _, body in recorder.calls] == ["Wendy"]
+
+
+def test_an_external_id_with_no_property_for_it_rejects_the_user():
+    recorder = Recorder([raw(1)])
+    s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
+    s.load()
+    s.users.get(id=1).external_id = "101"
+    assert [u.id for u, _ in s.commit(progress_every=0).rejected] == [1]
     assert recorder.calls == []

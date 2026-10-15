@@ -32,7 +32,7 @@ enforced. Some examples:
 ## Install
 
 ```sh
-pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.4.0"
+pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.5.0"
 ```
 
 ## Use
@@ -58,7 +58,8 @@ for user, method, body in result.planned:
 With `apply=False` nothing is sent; `result.planned` is what would have been.
 
 `external_id` is the key of a custom property that ties each user to a record
-elsewhere, and is optional. With it, users are written by `POST /users` on that
+elsewhere, and is optional. Its value is `user.external_id`, not one of
+`user.properties`. With it, users are written by `POST /users` on that
 `lookup_key`, and the Session holds it to one user per value, never changed.
 Without it, users are written by id, and a new user is posted bare -- which the
 CRM matches on email and phone, so a create that lands on an existing user is

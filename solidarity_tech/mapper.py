@@ -312,6 +312,9 @@ class User:
     then too: left out of the create, it is whatever the CRM defaults to, which
     is granted. Everything else the API returns on every user.
 
+    `external_id` is the value of the mapper's external-ID property, if it has
+    one, and is not also in `properties`.
+
     `properties` are by key, a select's by option label:
     `user.properties["membership-status"] = "Retired"`. A user read holds
     every property in the account, None where it is unset: the API returns
@@ -324,6 +327,7 @@ class User:
     chapter_id: int
     email_permission: bool
     id: int | None = None
+    external_id: str | None = None
     sms_permission: bool | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -409,9 +413,11 @@ class UserMapper:
         for key, value in (raw.get("custom_user_properties") or {}).items():
             prop = self.properties.get(key)
             properties[key] = value if prop is None else self.read_value(prop, value)
+        external_id = properties.pop(self.external_id_key, None)
         assessment = raw.get("assessment")
         return User(
             id=raw["id"],
+            external_id=None if external_id in (None, "") else str(external_id),
             chapter_id=raw["chapter_id"],
             email_permission=raw["email_permission"],
             sms_permission=raw["sms_permission"],
@@ -525,16 +531,11 @@ class UserMapper:
                     " store it as empty, wiping what it held"
                 ) from None
 
-    def external_id(self, user):
-        if self.external_id_key is None:
-            return None
-        value = user.properties.get(self.external_id_key)
-        return None if value in (None, "") else str(value)
-
     def state(self, user):
         """What a request would say about this user, field by field."""
         return {
             **{name: getattr(user, name) for name in SCALARS},
+            "external_id": user.external_id,
             "email": user.emails.preferred,
             "phone_number": user.phone_numbers.preferred,
             "emails": frozenset(user.emails),
@@ -552,6 +553,7 @@ class UserMapper:
         """The state of a user that does not exist yet."""
         return {
             **{name: None for name in SCALARS},
+            "external_id": None,
             "email": None,
             "phone_number": None,
             "emails": frozenset(),
@@ -584,6 +586,8 @@ class UserMapper:
             for k, v in after["properties"].items()
             if before["properties"].get(k, "") != v
         }
+        if after["external_id"] != before["external_id"]:
+            properties[self.external_id_key] = after["external_id"]
         if properties:
             body["custom_user_properties"] = properties
         if after["tags"] - before["tags"]:
@@ -731,7 +735,7 @@ class Users:
         self._index()
         holders = {}
         for user in self._users.values():
-            external = self.mapper.external_id(user)
+            external = user.external_id
             if external is not None:
                 holders.setdefault(external, []).append(user.id)
         shared = {k: ids for k, ids in holders.items() if len(ids) > 1}
@@ -764,14 +768,9 @@ class Users:
         commit."""
         return dict(self._keyed)
 
-    def external_id(self, user):
-        return self.mapper.external_id(user)
-
     def _index(self):
         self._keyed = {
-            self.mapper.external_id(u): u
-            for u in self._users.values()
-            if self.mapper.external_id(u) is not None
+            u.external_id: u for u in self._users.values() if u.external_id is not None
         }
 
     def holders(self):
@@ -805,7 +804,7 @@ class Users:
         for duplicate in duplicates:
             del self._users[duplicate.id]
             del self._before[duplicate.id]
-            self._keyed.pop(self.mapper.external_id(duplicate), None)
+            self._keyed.pop(duplicate.external_id, None)
         state = self.mapper.state(survivor)
         self._before[survivor.id] = {
             **self._before[survivor.id],
@@ -817,11 +816,9 @@ class Users:
         """Send what changed: writes to users read, creates, then deletes."""
         result = Commit()
         for user in self._users.values():
-            was = self._external_before(self._before[user.id])
-            if was is not None and self.mapper.external_id(user) != was:
-                raise ExternalIdChanged(
-                    f"user {user.id}: {was} -> {self.mapper.external_id(user)}"
-                )
+            was = self._before[user.id]["external_id"]
+            if was is not None and user.external_id != was:
+                raise ExternalIdChanged(f"user {user.id}: {was} -> {user.external_id}")
         changed = [(u, self._before[u.id], False) for u in self._users.values()]
         changed += [(u, self.mapper.blank(), True) for u in self._new]
         self._withhold_contested(changed, result)
@@ -829,6 +826,15 @@ class Users:
         writes = []
         for user, before, new in changed:
             try:
+                if user.external_id is not None and self.mapper.external_id_key is None:
+                    raise ValueError(
+                        "has an external ID, and the mapper names no property for it"
+                    )
+                if self.mapper.external_id_key in user.properties:
+                    raise ValueError(
+                        f"{self.mapper.external_id_key} is the external ID; set"
+                        " external_id, not the property"
+                    )
                 after = self.mapper.state(user)
                 for key, value in user.properties.items():
                     if after["properties"][key] != before["properties"].get(key, ""):
@@ -836,8 +842,8 @@ class Users:
             except (KeyError, ValueError) as error:
                 result.rejected.append((user, str(error)))
                 continue
-            keyed = (new and self.mapper.external_id(user) is not None) or (
-                self._external_before(before) is not None
+            keyed = (new and user.external_id is not None) or (
+                before["external_id"] is not None
             )
             for n, body in enumerate(self.mapper.writes(before, after, new=new)):
                 # Without an external ID, a new user is posted once and is
@@ -897,12 +903,6 @@ class Users:
                             contacts.preferred = before[one]
                 result.withheld.append((user, contact))
 
-    def _external_before(self, before):
-        if self.mapper.external_id_key is None:
-            return None
-        value = before["properties"].get(self.mapper.external_id_key)
-        return None if value in (None, "") else str(value)
-
     def _send(self, user, body, method, result):
         """Whether the write landed on the user it was for."""
         try:
@@ -910,7 +910,7 @@ class Users:
                 self.mapper.update(user, body)
                 return True
             try:
-                written = self.mapper.upsert(self.mapper.external_id(user), body)
+                written = self.mapper.upsert(user.external_id, body)
             except requests.HTTPError as error:
                 # An address the CRM will not deliver to rejects the whole
                 # user. Better the user without it than no user.
@@ -920,7 +920,7 @@ class Users:
                 body = {k: v for k, v in body.items() if k != "email"}
                 if not body:
                     return True
-                written = self.mapper.upsert(self.mapper.external_id(user), body)
+                written = self.mapper.upsert(user.external_id, body)
         except requests.RequestException as error:
             result.rejected.append((user, str(error)[-200:]))
             return False
@@ -934,7 +934,7 @@ class Users:
                 result.misdirected.append((user, written))
                 log.error(
                     "  a create for %s landed on existing user %s",
-                    self.mapper.external_id(user),
+                    user.external_id,
                     written,
                 )
                 return False

@@ -313,7 +313,9 @@ class User:
     is granted. Everything else the API returns on every user.
 
     `properties` are by key, a select's by option label:
-    `user.properties["membership-status"] = "Retired"`.
+    `user.properties["membership-status"] = "Retired"`. A user read holds
+    every property in the account, None where it is unset: the API returns
+    every key on every user (tested 2026-10-14).
 
     `login` is whether a team member signs in as this user. The user record
     does not say; only `/team_members` does. It is read, never written.
@@ -434,7 +436,8 @@ class UserMapper:
     def read_value(prop, value):
         """A property's value as read, in the terms it is assigned in.
 
-        A select reads back as every option whose value the stored string
+        Every value but a select's or a checkbox's comes back a string. A
+        select reads back as every option whose value the stored string
         contains, so a stored "Non-Teaching Adjuncts" reads as that and
         "Teaching Adjuncts" both. Each is a substring of what was written, so
         the longest is what was. Checkboxes hold several on purpose.
@@ -455,6 +458,16 @@ class UserMapper:
                 return date.fromisoformat(value)
             except ValueError:
                 return value
+        if prop.type == "number" and isinstance(value, str):
+            # Stored as sent, so a value written as 45.0 reads back "45.0" and
+            # one written as 90 reads "90"; each is read as what was written.
+            if value == "":
+                return None
+            for parse in (int, float):
+                try:
+                    return parse(value)
+                except ValueError:
+                    pass
         return value
 
     @staticmethod

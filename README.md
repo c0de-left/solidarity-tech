@@ -32,7 +32,7 @@ enforced. Some examples:
 ## Install
 
 ```sh
-pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.3.0"
+pip install "solidarity-tech @ git+https://github.com/c0de-left/solidarity-tech@v0.4.0"
 ```
 
 ## Use

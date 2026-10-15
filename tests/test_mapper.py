@@ -68,7 +68,7 @@ class Recorder:
         self.lands_on = {
             u["custom_user_properties"]["member-id"]: u["id"]
             for u in self.users_
-            if "member-id" in u["custom_user_properties"]
+            if u["custom_user_properties"].get("member-id")
         }
         self.lands_on.update(lands_on or {})
         self.reject = None
@@ -118,7 +118,8 @@ class Recorder:
 
 def raw(user_id, person_id=None, **fields):
     """A user as GET /users returns it: every key, always."""
-    properties = {"member-id": person_id} if person_id else {}
+    properties = {p.key: None for p in PROPERTIES}
+    properties["member-id"] = person_id
     properties.update(fields.pop("properties", {}))
     return {
         "id": user_id,
@@ -653,3 +654,22 @@ def test_without_an_external_id_a_create_matched_to_someone_is_reported():
     new = s.users.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
     result = s.commit(progress_every=0)
     assert result.misdirected == [(new, 1)]
+
+
+def test_a_number_reads_as_the_number_written_and_unset_as_none():
+    s, recorder = session(
+        raw(1, "101", properties={"teaching-hours-per-term": "45.0"}),
+        raw(2, "102", properties={"teaching-hours-per-term": "90"}),
+        raw(3, "103", properties={"teaching-hours-per-term": None, "hire-date": None}),
+    )
+    assert s.users.get(id=1).properties["teaching-hours-per-term"] == 45.0
+    assert s.users.get(id=2).properties["teaching-hours-per-term"] == 90
+    assert s.users.get(id=3).properties == {
+        "member-id": "103",
+        "membership-status": None,
+        "title-series": None,
+        "hire-date": None,
+        "teaching-hours-per-term": None,
+    }
+    s.commit(progress_every=0)
+    assert recorder.calls == []

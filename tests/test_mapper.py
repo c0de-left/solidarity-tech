@@ -167,7 +167,7 @@ def test_a_select_read_by_containment_is_the_option_written():
             },
         )
     )
-    user = s.get(1)
+    user = s.users.get(id=1)
     assert user.properties["title-series"] == "Non-Teaching Adjuncts"
     user.properties["title-series"] = "Non-Teaching Adjuncts"
     assert s.commit().planned == []
@@ -192,9 +192,9 @@ def test_a_select_keyed_on_a_code_is_compared_on_the_code():
             },
         )
     )
-    s.get(1).properties["membership-status"] = "Retired"
+    s.users.get(id=1).properties["membership-status"] = "Retired"
     assert s.commit().planned == []
-    s.get(1).properties["membership-status"] = "Active"
+    s.users.get(id=1).properties["membership-status"] = "Active"
     s.commit()
     assert recorder.calls[-1][2]["custom_user_properties"] == {
         "membership-status": "Active",
@@ -206,7 +206,7 @@ def test_a_date_reaches_the_crm_as_a_day():
     """A date property stores what it is sent, so a datetime would read as one."""
     assert UserMapper.write_value(HIRED, datetime.datetime(2026, 7, 13)) == "2026-07-13"
     s, _ = session(raw(1, "101", properties={"hire-date": "2026-07-13"}))
-    assert s.get(1).properties["hire-date"] == datetime.date(2026, 7, 13)
+    assert s.users.get(id=1).properties["hire-date"] == datetime.date(2026, 7, 13)
 
 
 def test_an_option_label_is_read_in_either_shape():
@@ -231,7 +231,7 @@ def test_an_option_label_is_read_in_either_shape():
 
 def test_only_what_changed_is_sent():
     s, recorder = session(raw(1, "101", tags=["Chapter Chair", "Dept Rep"]))
-    user = s.get(1)
+    user = s.users.get(id=1)
     user.tags = {"Chapter Chair", "Delegate"}
     user.first_name = "Wanda"
     s.commit()
@@ -253,7 +253,7 @@ def test_only_what_changed_is_sent():
 
 def test_an_address_is_sent_whole_when_any_part_changed():
     s, recorder = session(raw(1, "101"))
-    user = s.get(1)
+    user = s.users.get(id=1)
     user.address = {**user.address, "address1": "175 Willoughby St", "city": "Brooklyn"}
     s.commit()
     assert recorder.calls[0][2]["address"] == {
@@ -265,7 +265,7 @@ def test_an_address_is_sent_whole_when_any_part_changed():
 
 def test_clearing_a_field_the_api_has_not_been_tested_on_refuses():
     s, _ = session(raw(1, "101", email="wanda@example.org"))
-    s.get(1).emails.preferred = None
+    s.users.get(id=1).emails.preferred = None
     with pytest.raises(ValueError, match="untested"):
         s.commit()
 
@@ -275,7 +275,7 @@ def test_clearing_a_field_the_api_has_not_been_tested_on_refuses():
 
 def test_a_user_read_with_an_external_id_is_written_on_it():
     s, recorder = session(raw(1, "101"))
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).first_name = "Wendy"
     s.commit()
     assert recorder.calls[0][:2] == ("POST", "/users")
     assert recorder.calls[0][2]["lookup_key"] == "member-id"
@@ -285,17 +285,17 @@ def test_giving_a_user_its_external_id_is_a_put():
     """A POST on an ID nobody holds yet would create somebody, or take over
     whoever holds the phone."""
     s, recorder = session(raw(7))
-    s.get(7).properties["member-id"] = "102"
+    s.users.get(id=7).properties["member-id"] = "102"
     s.commit()
     assert recorder.calls == [
         ("PUT", "/users/7", {"custom_user_properties": {"member-id": "102"}})
     ]
-    assert s.get(external_id="102").id == 7
+    assert s.users.get(external_id="102").id == 7
 
 
 def test_an_external_id_is_never_changed():
     s, recorder = session(raw(1, "101"))
-    s.get(1).properties["member-id"] = "102"
+    s.users.get(id=1).properties["member-id"] = "102"
     with pytest.raises(ExternalIdChanged):
         s.commit()
     assert recorder.calls == []
@@ -309,7 +309,7 @@ def test_two_users_holding_one_external_id_stop_the_load():
 def test_a_create_that_lands_on_somebody_already_held_is_reported():
     """The lookup missed, and the CRM matched an existing user by phone."""
     s, _ = session(raw(1, "101"), lands_on={"102": 1})
-    new = s.add(
+    new = s.users.add(
         User(
             chapter_id=2913,
             email_permission=True,
@@ -323,24 +323,24 @@ def test_a_create_that_lands_on_somebody_already_held_is_reported():
 
 def test_a_write_that_lands_on_another_user_is_reported():
     s, _ = session(raw(1, "101"), raw(2, "102"), lands_on={"101": 2})
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).first_name = "Wendy"
     assert [(u.id, landed) for u, landed in s.commit().misdirected] == [(1, 2)]
 
 
 def test_a_create_gets_the_id_it_landed_on():
     s, _ = session(lands_on={"102": 55})
-    new = s.add(User(chapter_id=2913, email_permission=True))
+    new = s.users.add(User(chapter_id=2913, email_permission=True))
     new.properties["member-id"] = "102"
     s.commit()
     assert new.id == 55
-    assert s.get(external_id="102") is new
+    assert s.users.get(external_id="102") is new
 
 
 def test_an_undeliverable_email_is_dropped_rather_than_the_person():
     s, recorder = session(raw(1, "101"))
     recorder.reject = "email"
-    s.get(1).emails.preferred = Email("wanda@bounces.example")
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).emails.preferred = Email("wanda@bounces.example")
+    s.users.get(id=1).first_name = "Wendy"
     result = s.commit()
     assert [u.id for u, _ in result.undeliverable] == [1]
     assert "email" not in recorder.calls[-1][2]
@@ -352,7 +352,7 @@ def test_an_undeliverable_email_is_dropped_rather_than_the_person():
 
 def test_a_dry_run_sends_nothing_and_plans_the_same():
     s, recorder = session(raw(1, "101"), apply=False)
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).first_name = "Wendy"
     result = s.commit()
     assert recorder.calls == []
     assert [(u.id, method) for u, method, _ in result.planned] == [(1, "POST")]
@@ -363,12 +363,12 @@ def test_a_merge_moves_the_duplicates_contacts_onto_the_survivor():
         raw(50, "101", email="wokonkwo@work.example"),
         raw(9, email="wanda@home.example", phone_number="13475550102"),
     )
-    s.merge(s.get(50), [s.get(9)])
+    s.users.merge(s.users.get(id=50), [s.users.get(id=9)])
     assert recorder.calls == [
         ("POST", "/users/merge", {"primary_user_id": 50, "user_ids": [9]})
     ]
-    survivor = s.get(50)
-    assert s.get(9) is None
+    survivor = s.users.get(id=50)
+    assert s.users.get(id=9) is None
     assert Email("wanda@home.example") in survivor.emails
     assert survivor.emails.preferred == Email("wokonkwo@work.example")
     assert PhoneNumber("13475550102") in survivor.phone_numbers
@@ -395,7 +395,7 @@ def test_the_preferred_contact_is_always_held():
 
 def test_a_number_held_in_another_spelling_is_not_written_again():
     s, recorder = session(raw(1, "101", phone_number="12125550101"))
-    s.get(1).phone_numbers.add(PhoneNumber("212-555-0101"))
+    s.users.get(id=1).phone_numbers.add(PhoneNumber("212-555-0101"))
     s.commit()
     assert recorder.calls == []
 
@@ -406,7 +406,7 @@ def test_adding_numbers_writes_each_then_ends_on_the_preferred():
     s, recorder = session(
         raw(1, "101", phone_number="2125550101", email="wanda@example.org")
     )
-    user = s.get(1)
+    user = s.users.get(id=1)
     user.phone_numbers |= [PhoneNumber("7185551212"), PhoneNumber("3475550101")]
     user.emails.add(Email("wokonkwo@work.example"))
     s.commit()
@@ -423,16 +423,16 @@ def test_adding_numbers_writes_each_then_ends_on_the_preferred():
 def test_a_new_preferred_number_is_one_write():
     """The old primary is displaced into the others by the CRM itself."""
     s, recorder = session(raw(1, "101", phone_number="17185550103"))
-    s.get(1).phone_numbers.preferred = PhoneNumber("13475550102")
+    s.users.get(id=1).phone_numbers.preferred = PhoneNumber("13475550102")
     s.commit()
     assert len(recorder.calls) == 1
     assert recorder.calls[0][2]["phone_number"] == "13475550102"
-    assert PhoneNumber("17185550103") in s.get(1).phone_numbers
+    assert PhoneNumber("17185550103") in s.users.get(id=1).phone_numbers
 
 
 def test_a_new_user_is_created_then_given_the_rest():
     s, recorder = session(lands_on={"102": 55})
-    new = s.add(User(chapter_id=2913, email_permission=True))
+    new = s.users.add(User(chapter_id=2913, email_permission=True))
     new.properties["member-id"] = "102"
     new.phone_numbers |= [PhoneNumber("7185551212")]
     new.phone_numbers.preferred = PhoneNumber("2125550101")
@@ -449,7 +449,7 @@ def test_taking_a_number_off_refuses():
     s, _ = session(
         raw(1, "101", phone_number="2125550101", other_phone_numbers=["7185551212"])
     )
-    s.get(1).phone_numbers.discard(PhoneNumber("7185551212"))
+    s.users.get(id=1).phone_numbers.discard(PhoneNumber("7185551212"))
     with pytest.raises(ValueError, match="untested"):
         s.commit()
 
@@ -460,28 +460,28 @@ def test_a_number_another_user_holds_is_withheld():
         raw(1, "101", phone_number="2125550101"),
         raw(2, "102", other_phone_numbers=["7185551212"]),
     )
-    s.get(1).phone_numbers.add(PhoneNumber("718-555-1212"))
+    s.users.get(id=1).phone_numbers.add(PhoneNumber("718-555-1212"))
     result = s.commit()
     assert recorder.calls == []
     assert [(u.id, str(c)) for u, c in result.withheld] == [(1, "718-555-1212")]
-    assert PhoneNumber("7185551212") not in s.get(1).phone_numbers
+    assert PhoneNumber("7185551212") not in s.users.get(id=1).phone_numbers
 
 
 def test_a_number_two_users_want_goes_to_neither():
     s, recorder = session(raw(1, "101"), raw(2, "102"))
     for user_id in (1, 2):
-        s.get(user_id).phone_numbers.preferred = PhoneNumber("7185551212")
+        s.users.get(id=user_id).phone_numbers.preferred = PhoneNumber("7185551212")
     result = s.commit()
     assert recorder.calls == []
     assert sorted(u.id for u, _ in result.withheld) == [1, 2]
-    assert s.get(1).phone_numbers.preferred is None
+    assert s.users.get(id=1).phone_numbers.preferred is None
 
 
 def test_a_failed_create_sends_none_of_the_rest():
     """A lookup on a user who was never created would create somebody else."""
     s, recorder = session()
     recorder.reject = "chapter_id"
-    new = s.add(User(chapter_id=2913, email_permission=True))
+    new = s.users.add(User(chapter_id=2913, email_permission=True))
     new.properties["member-id"] = "102"
     new.phone_numbers |= [PhoneNumber("7185551212")]
     new.phone_numbers.preferred = PhoneNumber("2125550101")
@@ -494,7 +494,7 @@ def test_a_refused_write_is_still_owed():
     """The CRM did not take it, so the next commit sends it again."""
     s, recorder = session(raw(1, "101"))
     recorder.reject = "first_name"
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).first_name = "Wendy"
     assert [u.id for u, _ in s.commit().rejected] == [1]
     recorder.reject = None
     s.commit()
@@ -503,11 +503,11 @@ def test_a_refused_write_is_still_owed():
 
 def test_a_misdirected_create_does_not_replace_the_user_it_landed_on():
     s, _ = session(raw(1, "101"), lands_on={"102": 1})
-    held = s.get(1)
-    new = s.add(User(chapter_id=2913, email_permission=True))
+    held = s.users.get(id=1)
+    new = s.users.add(User(chapter_id=2913, email_permission=True))
     new.properties["member-id"] = "102"
     s.commit()
-    assert s.get(1) is held
+    assert s.users.get(id=1) is held
     assert new.id is None
 
 
@@ -517,8 +517,8 @@ def test_a_misdirected_create_does_not_replace_the_user_it_landed_on():
 def test_a_select_value_outside_its_options_is_refused_not_sent():
     """The CRM ignores it, so it would be sent again every run, unnoticed."""
     s, recorder = session(raw(1, "101"), raw(2, "102"))
-    s.get(1).properties["membership-status"] = "retired"
-    s.get(2).properties["membership-status"] = "Retired"
+    s.users.get(id=1).properties["membership-status"] = "retired"
+    s.users.get(id=2).properties["membership-status"] = "Retired"
     result = s.commit()
     assert [u.id for u, _ in result.rejected] == [1]
     assert "not one of its options" in result.rejected[0][1]
@@ -529,10 +529,10 @@ def test_a_select_value_outside_its_options_is_refused_not_sent():
 
 def test_text_in_a_number_is_refused_because_it_would_wipe_the_value():
     s, recorder = session(raw(1, "101"))
-    s.get(1).properties["teaching-hours-per-term"] = "three courses"
+    s.users.get(id=1).properties["teaching-hours-per-term"] = "three courses"
     assert "not a number" in s.commit().rejected[0][1]
     assert recorder.calls == []
-    s.get(1).properties["teaching-hours-per-term"] = 45.0
+    s.users.get(id=1).properties["teaching-hours-per-term"] = 45.0
     s.commit()
     assert recorder.calls[-1][2]["custom_user_properties"][HOURS.key] == "45.0"
 
@@ -546,7 +546,7 @@ def test_a_value_the_crm_already_holds_is_not_second_guessed():
             properties={"membership-status": [{"label": "Gone", "value": "x"}]},
         )
     )
-    s.get(1).first_name = "Wendy"
+    s.users.get(id=1).first_name = "Wendy"
     assert s.commit().rejected == []
     assert len(recorder.calls) == 1
 
@@ -557,9 +557,9 @@ def test_a_login_is_never_merged_away():
     client.paginate = lambda path: [{"user_id": 2}]
     s = Session(UserMapper(client, "member-id", PROPERTIES), apply=True)
     s.load()
-    assert s.get(2).login and not s.get(1).login
+    assert s.users.get(id=2).login and not s.users.get(id=1).login
     with pytest.raises(LoginMergedAway):
-        s.merge(s.get(1), [s.get(2)])
+        s.users.merge(s.users.get(id=1), [s.users.get(id=2)])
     assert client.calls == []
 
 
@@ -581,12 +581,16 @@ def test_a_note_keeps_its_date_in_seconds():
 # --- Lookups, properties, and users with no external ID ----------------------
 
 
-def test_users_are_found_by_id_or_external_id():
+def test_users_are_found_by_id_or_external_id_and_by_nothing_else():
     s, _ = session(raw(1, "101"), raw(2))
-    assert s.get(1).id == 1
-    assert s.get(external_id="101") is s.get(1)
-    assert s.get(external_id="102") is None
-    assert len(s) == 2 and {u.id for u in s} == {1, 2}
+    assert s.users.get(id=1).id == 1
+    assert s.users.get(external_id="101") is s.users.get(id=1)
+    assert s.users.get(external_id="102") is None
+    assert len(s.users) == 2 and {u.id for u in s.users} == {1, 2}
+    with pytest.raises(TypeError):
+        s.users.get(1)
+    with pytest.raises(TypeError):
+        s.users.get(id=1, external_id="101")
 
 
 def test_the_accounts_properties_are_read_when_first_needed():
@@ -604,8 +608,8 @@ def test_the_accounts_properties_are_read_when_first_needed():
     s = Session(UserMapper(client, "member-id"), apply=True)
     s.load()
     assert client.calls == [("GET", "/custom_user_properties", None)]
-    assert s.get(1).properties["membership-status"] == "Retired"
-    s.get(1).properties["membership-status"] = "Active"
+    assert s.users.get(id=1).properties["membership-status"] == "Retired"
+    s.users.get(id=1).properties["membership-status"] = "Active"
     s.commit(progress_every=0)
     assert client.calls[-1][2]["custom_user_properties"] == {
         "membership-status": "Active",
@@ -615,8 +619,8 @@ def test_the_accounts_properties_are_read_when_first_needed():
 
 def test_a_property_the_account_lacks_rejects_the_user():
     s, recorder = session(raw(1, "101"), raw(2, "102"))
-    s.get(1).properties["no-such-thing"] = "x"
-    s.get(2).first_name = "Wendy"
+    s.users.get(id=1).properties["no-such-thing"] = "x"
+    s.users.get(id=2).first_name = "Wendy"
     result = s.commit(progress_every=0)
     assert [(u.id, "no-such-thing" in e) for u, e in result.rejected] == [(1, True)]
     assert [c[2]["first_name"] for c in recorder.calls] == ["Wendy"]
@@ -626,8 +630,8 @@ def test_without_an_external_id_users_are_written_by_id():
     recorder = Recorder([raw(1, phone_number="2125550101")])
     s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
     s.load()
-    s.get(1).first_name = "Wendy"
-    new = s.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
+    s.users.get(id=1).first_name = "Wendy"
+    new = s.users.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
     new.phone_numbers |= [PhoneNumber("7185551212")]
     new.phone_numbers.preferred = PhoneNumber("3475550101")
     s.commit(progress_every=0)
@@ -638,7 +642,7 @@ def test_without_an_external_id_users_are_written_by_id():
         ("PUT", "/users/99"),
     ]
     assert all("lookup_key" not in body for _, _, body in recorder.calls)
-    assert s.get(99) is new
+    assert s.users.get(id=99) is new
 
 
 def test_without_an_external_id_a_create_matched_to_someone_is_reported():
@@ -646,6 +650,6 @@ def test_without_an_external_id_a_create_matched_to_someone_is_reported():
     recorder = Recorder([raw(1, phone_number="2125550101")], lands_on={None: 1})
     s = Session(UserMapper(recorder, properties=PROPERTIES), apply=True)
     s.load()
-    new = s.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
+    new = s.users.add(User(chapter_id=2913, email_permission=True, first_name="Ben"))
     result = s.commit(progress_every=0)
     assert result.misdirected == [(new, 1)]

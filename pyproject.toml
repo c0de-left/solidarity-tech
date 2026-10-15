@@ -1,6 +1,6 @@
 [project]
 name = "solidarity-tech"
-version = "0.2.0"
+version = "0.3.0"
 description = "Data mappers for the Solidarity Tech CRM API: users, custom properties and notes as objects, and the requests that keep them."
 readme = "README.md"
 license = "MIT"

@@ -690,12 +690,9 @@ class Commit:
         return len({id(user) for user, _, _ in self.planned})
 
 
-class Session:
-    """The users of one run: one object per CRM user, and what changed.
-
-    Nothing is sent unless `apply`. A dry run goes through the same steps and
-    leaves the objects as the account would be, so what follows reads the
-    account as it would be too.
+class Users:
+    """A session's users: one object per CRM user, a snapshot of each as last
+    read or written, and what has changed since.
 
     An email or phone is on one user per organisation. Written to a second, it
     is a 422 at best; posted as the primary of a user whose lookup misses, it
@@ -713,7 +710,7 @@ class Session:
         self._new = []
         self._removed = []
 
-    def load(self, users=None):
+    def _load(self, users=None):
         """Read every user, or take these. Raises on a shared external ID."""
         found = self.mapper.find_all() if users is None else users
         self._users = {u.id: u for u in found}
@@ -737,12 +734,14 @@ class Session:
     def __len__(self):
         return len(self._users)
 
-    def get(self, id=None, *, external_id=None):
+    def get(self, *, id=None, external_id=None):
         """The user with this CRM id, or this external ID, or None.
 
         By external ID as of the last load or commit: a user given one since
         is found by it once it is written.
         """
+        if (id is None) == (external_id is None):
+            raise TypeError("get() takes one of id or external_id")
         if external_id is not None:
             return self._keyed.get(str(external_id))
         return self._users.get(int(id))
@@ -801,7 +800,7 @@ class Session:
             "phone_numbers": state["phone_numbers"],
         }
 
-    def commit(self, progress_every=100):
+    def _flush(self, progress_every):
         """Send what changed: writes to users read, creates, then deletes."""
         result = Commit()
         for user in self._users.values():
@@ -932,3 +931,24 @@ class Session:
             log.error("  a write for user %s landed on user %s", user.id, written)
             return False
         return True
+
+
+class Session:
+    """What one run reads and writes, by kind of object: `session.users`.
+
+    Nothing is sent unless `apply`. A dry run goes through the same steps and
+    leaves the objects as the account would be, so what follows reads the
+    account as it would be too.
+    """
+
+    def __init__(self, mapper, apply):
+        self.apply = apply
+        self.users = Users(mapper, apply)
+
+    def load(self, users=None):
+        """Read every user, or take these."""
+        self.users._load(users)
+
+    def commit(self, progress_every=100):
+        """Send what changed."""
+        return self.users._flush(progress_every)

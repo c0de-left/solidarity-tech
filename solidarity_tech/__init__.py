@@ -26,6 +26,7 @@ from solidarity_tech.mapper import (
     Session,
     User,
     UserMapper,
+    Users,
 )
 
 __all__ = [
@@ -51,4 +52,5 @@ __all__ = [
     "Unanswered",
     "User",
     "UserMapper",
+    "Users",
 ]

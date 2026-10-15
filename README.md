@@ -84,6 +84,40 @@ To see what an account holds:
 SOLIDARITY_API_KEY=... python -m solidarity_tech check
 ```
 
+## Loading reads the whole account
+
+`session.load()` reads every user in the account, along with its custom
+properties and its team members. At 100 users a page and the API's 2 requests
+a second, 40,000 users is about 400 requests and three and a half minutes.
+
+That is deliberate, for two reasons.
+
+**The API cannot select users.** `GET /users` filters on an exact email, an
+exact phone number, "updated since", or a saved user list, and nothing else:
+not a custom property (so not an external ID), not a chapter, not a tag or a
+name. A saved list can express more, but it is built in the dashboard. So the
+session holds every user and finds them in memory: `session.users.get(...)`
+uses indexes built at load and kept through each commit, and anything else
+is a comprehension over `session.users`.
+
+**What the session guarantees needs every user.**
+
+- **Only changes are sent.** Each user is compared with what the CRM held
+  when read, so an unchanged account costs no writes.
+- **No takeover.** An address or number another user holds is withheld,
+  which needs to know who holds every one.
+- **A misdirected write is caught.** A `POST /users` answers with an id and
+  nothing else, and the session checks that id against every user it read.
+- **One user per external ID.** Two users sharing one is an error at load,
+  before an upsert can land on either.
+
+The users are walked by cursor from `_cursor=start`. Offset paging reorders as
+the account is written to, and has read some users twice and skipped others
+mid-walk.
+
+Lookups other than by `id` are as of the last load or commit: a user given an
+external ID or an address since is found by it once it is written.
+
 ## Tests
 
 ```sh
